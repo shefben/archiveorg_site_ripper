@@ -37,6 +37,14 @@ session.headers.update({'User-Agent': 'ArchiveRipper/1.0'})
 # File types that are likely textual and can be cleaned of Wayback comments
 TEXT_EXTS = {'.css', '.js', '.html', '.htm', '.svg', '.json', '.xml', '.txt'}
 
+# Regex patterns to extract asset URLs from CSS and JavaScript files
+CSS_URL_RE = re.compile(r"url\(([^)]+)\)")
+CSS_IMPORT_RE = re.compile(r"@import\s+(?:url\()?['\"]([^'\"]+)['\"]\)?")
+# Common asset extensions that might be referenced from JavaScript
+JS_URL_RE = re.compile(
+    r"['\"]([^'\"]+\.(?:css|js|png|jpe?g|gif|svg|webp|mp4|mp3|webm|woff2?|woff|ttf|eot|otf|json|xml))['\"]"
+)
+
 # Tags that contain asset URLs we want to download locally
 SRC_ASSET_TAGS = {
     'img', 'script', 'iframe', 'embed', 'source', 'audio',
@@ -121,6 +129,93 @@ def make_archive_url(timestamp: str, original_url: str) -> str:
     return f"{ARCHIVE_PREFIX}{timestamp}/{original_url}"
 
 
+def rewrite_css(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+) -> str:
+    def repl_url(match):
+        url = match.group(1).strip().strip("'\"")
+        if url.startswith('data:'):
+            return match.group(0)
+        abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        rel = process_asset(
+            abs_url,
+            asset_dir,
+            output_dir,
+            timestamp,
+            downloaded,
+            lock,
+        )
+        return f"url('{rel}')"
+
+    def repl_import(match):
+        url = match.group(1).strip().strip("'\"")
+        if url.startswith('data:'):
+            return match.group(0)
+        abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        rel = process_asset(
+            abs_url,
+            asset_dir,
+            output_dir,
+            timestamp,
+            downloaded,
+            lock,
+        )
+        return f"@import url('{rel}')"
+
+    text = CSS_URL_RE.sub(repl_url, text)
+    text = CSS_IMPORT_RE.sub(repl_import, text)
+    return text
+
+
+def rewrite_js(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+) -> str:
+    def repl(match):
+        url = match.group(1)
+        if url.startswith('data:'):
+            return match.group(0)
+        abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        rel = process_asset(
+            abs_url,
+            asset_dir,
+            output_dir,
+            timestamp,
+            downloaded,
+            lock,
+        )
+        quote = match.group(0)[0]
+        return f"{quote}{rel}{quote}"
+
+    return JS_URL_RE.sub(repl, text)
+
+
 def process_asset(
     asset_url: str,
     page_dir: str,
@@ -143,6 +238,27 @@ def process_asset(
         if ext in TEXT_EXTS:
             text = data.decode('utf-8', 'ignore')
             text = strip_archive_comments(text)
+            asset_dir = os.path.dirname(local_path)
+            if ext == '.css':
+                text = rewrite_css(
+                    text,
+                    original,
+                    asset_dir,
+                    output_dir,
+                    timestamp,
+                    downloaded,
+                    lock,
+                )
+            elif ext == '.js':
+                text = rewrite_js(
+                    text,
+                    original,
+                    asset_dir,
+                    output_dir,
+                    timestamp,
+                    downloaded,
+                    lock,
+                )
             data = text.encode('utf-8')
         save_file(data, local_path)
         mark_downloaded(output_dir, original, lock, downloaded)
@@ -168,6 +284,15 @@ def process_html(
     for s in soup.find_all('script'):
         src = s.get('src', '')
         text = s.string or ''
+        full_src = urljoin(original_url, src)
+        try:
+            if 'web.archive.org' in full_src:
+                _, full_src = parse_archive_url(full_src)
+        except ValueError:
+            pass
+        if urlparse(full_src).netloc == 'web-static.archive.org':
+            s.decompose()
+            continue
         if (
             'archive.org' in src
             or 'wayback' in src
