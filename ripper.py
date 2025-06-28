@@ -137,7 +137,7 @@ def make_archive_url(timestamp: str, original_url: str, raw: bool = False) -> st
         return f"{ARCHIVE_PREFIX}{timestamp}id_/{original_url}"
     return f"{ARCHIVE_PREFIX}{timestamp}/{original_url}"
 
-
+  
 def find_nearest_snapshot(original_url: str, timestamp: str) -> Optional[str]:
     """Query the CDX API for the closest snapshot of the given URL."""
     cdx = (
@@ -392,6 +392,7 @@ def process_html(
 
     page_local = compute_local_path(output_dir, original_url, add_ext=True)
     page_dir = os.path.dirname(page_local)
+    page_archive_url = make_archive_url(timestamp, original_url)
 
     def prepare_asset(tag, attr, collection):
         url = tag.get(attr)
