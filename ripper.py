@@ -9,6 +9,7 @@ import concurrent.futures
 from bs4 import BeautifulSoup, Comment
 from urllib.parse import urlparse, urljoin
 import hashlib
+from typing import Optional
 
 
 def log(msg: str):
@@ -135,7 +136,7 @@ def make_archive_url(timestamp: str, original_url: str, raw: bool = False) -> st
     return f"{ARCHIVE_PREFIX}{timestamp}{suffix}{original_url}"
 
 
-def find_nearest_snapshot(original_url: str, timestamp: str) -> str | None:
+def find_nearest_snapshot(original_url: str, timestamp: str) -> Optional[str]:
     """Query the CDX API for the closest snapshot of the given URL."""
     cdx = (
         "https://web.archive.org/cdx/search/cdx?"\
