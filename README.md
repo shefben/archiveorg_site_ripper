@@ -45,3 +45,6 @@ python ripper.py <archive url> -c 10
 The ripper records downloaded assets in `.downloaded.txt`. Re-running the same
 command skips files already fetched so you can resume an interrupted run. Use
 `--reset` to clear this log and start fresh.
+
+During execution, the script prints out each URL as it is fetched so you can
+observe progress immediately.

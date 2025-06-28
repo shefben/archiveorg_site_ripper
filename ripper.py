@@ -11,6 +11,11 @@ from urllib.parse import urlparse, urljoin
 import hashlib
 
 
+def log(msg: str):
+    """Print a message to stdout immediately."""
+    print(msg, flush=True)
+
+
 ARCHIVE_PREFIX = 'https://web.archive.org/web/'
 
 # Connection and retry tuning
@@ -27,6 +32,7 @@ adapter = requests.adapters.HTTPAdapter(
 )
 session.mount('http://', adapter)
 session.mount('https://', adapter)
+session.headers.update({'User-Agent': 'ArchiveRipper/1.0'})
 
 # File types that are likely textual and can be cleaned of Wayback comments
 TEXT_EXTS = {'.css', '.js', '.html', '.htm', '.svg', '.json', '.xml', '.txt'}
@@ -59,11 +65,13 @@ def save_file(content: bytes, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'wb') as f:
         f.write(content)
+    log(f"Saved {path}")
 
 
 def fetch_url(url: str) -> bytes:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
+            log(f"Downloading {url}")
             resp = session.get(url)
             resp.raise_for_status()
             time.sleep(RATE_LIMIT)
@@ -87,6 +95,8 @@ def compute_local_path(output_dir: str, original_url: str, add_ext: bool = False
     if add_ext:
         local = local + '.html'
     return local
+
+
 
 
 def load_downloaded(output_dir: str):
@@ -123,6 +133,8 @@ def process_asset(
     local_path = compute_local_path(output_dir, original)
     if original in downloaded or os.path.exists(local_path):
         return os.path.relpath(local_path, page_dir)
+
+    log(f"Fetching asset {asset_url}")
 
     archive_url = make_archive_url(timestamp, original)
     try:
@@ -262,6 +274,7 @@ def download_page(archive_url: str, output_dir: str, concurrency: int):
     timestamp, original_url = parse_archive_url(archive_url)
     downloaded = load_downloaded(output_dir)
     lock = threading.Lock()
+    log(f"Fetching {original_url} from {archive_url}")
 
     html_bytes = fetch_url(archive_url)
     html = html_bytes.decode('utf-8', 'ignore')
@@ -274,6 +287,7 @@ def download_page(archive_url: str, output_dir: str, concurrency: int):
         downloaded,
         lock,
     )
+    log(f"Page saved to {local_page}")
     return local_page
 
 
@@ -289,7 +303,7 @@ def main():
         if os.path.exists(path):
             os.remove(path)
     page = download_page(args.url, args.output, args.concurrency)
-    print(f'Saved page to {page}')
+    log(f'Saved page to {page}')
 
 
 if __name__ == '__main__':
