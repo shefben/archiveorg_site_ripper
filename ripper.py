@@ -89,8 +89,6 @@ def compute_local_path(output_dir: str, original_url: str, add_ext: bool = False
     return local
 
 
-
-
 def load_downloaded(output_dir: str):
     path = os.path.join(output_dir, '.downloaded.txt')
     if not os.path.exists(path):
