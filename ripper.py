@@ -137,6 +137,129 @@ def make_archive_url(timestamp: str, original_url: str, raw: bool = False) -> st
         return f"{ARCHIVE_PREFIX}{timestamp}id_/{original_url}"
     return f"{ARCHIVE_PREFIX}{timestamp}/{original_url}"
 
+  
+def find_nearest_snapshot(original_url: str, timestamp: str) -> Optional[str]:
+    """Query the CDX API for the closest snapshot of the given URL."""
+    cdx = (
+        "https://web.archive.org/cdx/search/cdx?"\
+        f"url={original_url}&output=json&limit=1"\
+        f"&closest={timestamp}&filter=statuscode:200&fl=timestamp"
+    )
+    try:
+        resp = session.get(cdx)
+        resp.raise_for_status()
+        data = resp.json()
+        if len(data) > 1 and len(data[1]) > 0:
+            return str(data[1][0])
+    except Exception as e:
+        log(f"CDX lookup failed for {original_url}: {e}")
+    return None
+
+
+def rewrite_css(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+) -> str:
+    def repl_url(match):
+        url = match.group(1).strip().strip("'\"")
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = process_asset(
+            abs_url,
+            asset_dir,
+            output_dir,
+            timestamp,
+            downloaded,
+            lock,
+        )
+        return f"url('{rel}')"
+
+    def repl_import(match):
+        url = match.group(1).strip().strip("'\"")
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = process_asset(
+            abs_url,
+            asset_dir,
+            output_dir,
+            timestamp,
+            downloaded,
+            lock,
+        )
+        return f"@import url('{rel}')"
+
+    text = CSS_URL_RE.sub(repl_url, text)
+    text = CSS_IMPORT_RE.sub(repl_import, text)
+    return text
+
+
+def rewrite_js(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+) -> str:
+    def repl(match):
+        url = match.group(1)
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = process_asset(
+            abs_url,
+            asset_dir,
+            output_dir,
+            timestamp,
+            downloaded,
+            lock,
+        )
+        quote = match.group(0)[0]
+        return f"{quote}{rel}{quote}"
+
+    return JS_URL_RE.sub(repl, text)
+
 
 def find_nearest_snapshot(original_url: str, timestamp: str) -> Optional[str]:
     """Query the CDX API for the closest snapshot of the given URL."""
@@ -466,6 +589,7 @@ def process_html(
 
     page_local = compute_local_path(output_dir, original_url, add_ext=True)
     page_dir = os.path.dirname(page_local)
+    page_archive_url = make_archive_url(timestamp, original_url)
 
     def prepare_asset(tag, attr, collection):
         url = tag.get(attr)
