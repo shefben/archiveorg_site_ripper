@@ -411,17 +411,17 @@ def process_html(
             collection.append((tag, attr, abs_url, ts))
 
     def rewrite_link(tag, attr):
-        url = tag.get(attr)
-        if not url or url.startswith('data:'):
+        val = tag.get(attr)
+        if not val or val.startswith('data:'):
             return
-        abs_archive = urljoin(page_archive_url, url)
-        if 'web.archive.org' in abs_archive:
+        abs_val = urljoin(original_url, val)
+        if 'web.archive.org' in abs_val:
             try:
-                _, abs_url = parse_archive_url(abs_archive)
+                _, abs_val = parse_archive_url(abs_val)
             except ValueError:
-                tag[attr] = abs_archive
+                tag[attr] = abs_val
                 return
-        parsed_abs = urlparse(abs_url)
+        parsed_abs = urlparse(abs_val)
         parsed_base = urlparse(original_url)
         if parsed_abs.netloc == parsed_base.netloc:
             new_url = parsed_abs.path.lstrip('/')
@@ -431,7 +431,7 @@ def process_html(
                 new_url += '#' + parsed_abs.fragment
             tag[attr] = new_url
         else:
-            tag[attr] = abs_url
+            tag[attr] = abs_val
 
     assets = []
     for t in soup.find_all(src=True):
