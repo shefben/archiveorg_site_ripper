@@ -54,10 +54,14 @@ HREF_ASSET_TAGS = {'link'}
 
 
 def parse_archive_url(url: str):
-    match = re.match(r'^https?://web\.archive\.org/web/(\d+)[^/]*/(https?://.*)$', url)
+    match = re.match(r'^https?://web\.archive\.org/web/(\d+)[^/]*/(.*)$', url)
     if not match:
         raise ValueError('URL is not a direct archive.org snapshot')
-    timestamp, original = match.groups()
+    timestamp, rest = match.groups()
+    idx = rest.rfind('http')
+    if idx == -1:
+        raise ValueError('URL is not a direct archive.org snapshot')
+    original = rest[idx:]
     return timestamp, original
 
 
@@ -148,6 +152,8 @@ def rewrite_css(
                 _, abs_url = parse_archive_url(abs_url)
             except ValueError:
                 return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
         rel = process_asset(
             abs_url,
             asset_dir,
@@ -168,6 +174,8 @@ def rewrite_css(
                 _, abs_url = parse_archive_url(abs_url)
             except ValueError:
                 return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
         rel = process_asset(
             abs_url,
             asset_dir,
@@ -202,6 +210,8 @@ def rewrite_js(
                 _, abs_url = parse_archive_url(abs_url)
             except ValueError:
                 return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
         rel = process_asset(
             abs_url,
             asset_dir,
@@ -262,8 +272,9 @@ def process_asset(
             data = text.encode('utf-8')
         save_file(data, local_path)
         mark_downloaded(output_dir, original, lock, downloaded)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"Failed to download {asset_url}: {e}")
+        return asset_url
     return os.path.relpath(local_path, page_dir)
 
 
@@ -300,6 +311,16 @@ def process_html(
             or 'archive' in text.lower()
         ):
             s.decompose()
+    for l in soup.find_all('link', href=True):
+        href = l['href']
+        abs_href = urljoin(original_url, href)
+        try:
+            if 'web.archive.org' in abs_href:
+                _, abs_href = parse_archive_url(abs_href)
+        except ValueError:
+            continue
+        if urlparse(abs_href).netloc == 'web-static.archive.org':
+            l.decompose()
     for c in soup.find_all(string=lambda t: isinstance(t, Comment)):
         if 'archive' in c.lower() or 'wayback' in c.lower():
             c.extract()
@@ -318,6 +339,9 @@ def process_html(
             except ValueError:
                 tag.decompose()
                 return
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            tag.decompose()
+            return
         if abs_url.startswith('http'):
             collection.append((tag, attr, abs_url))
 
@@ -332,7 +356,17 @@ def process_html(
             except ValueError:
                 tag[attr] = abs_url
                 return
-        tag[attr] = abs_url
+        parsed_abs = urlparse(abs_url)
+        parsed_base = urlparse(original_url)
+        if parsed_abs.netloc == parsed_base.netloc:
+            new_url = parsed_abs.path.lstrip('/')
+            if parsed_abs.query:
+                new_url += '?' + parsed_abs.query
+            if parsed_abs.fragment:
+                new_url += '#' + parsed_abs.fragment
+            tag[attr] = new_url
+        else:
+            tag[attr] = abs_url
 
     assets = []
     for t in soup.find_all(src=True):
@@ -376,6 +410,10 @@ def process_html(
                     t.decompose()
                     srcset = []
                     break
+            if urlparse(abs_url).netloc == 'web-static.archive.org':
+                t.decompose()
+                srcset = []
+                break
             rel = process_asset(
                 abs_url,
                 page_dir,
