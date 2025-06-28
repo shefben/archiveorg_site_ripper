@@ -19,10 +19,11 @@ def log(msg: str):
 ARCHIVE_PREFIX = 'https://web.archive.org/web/'
 
 # Connection and retry tuning
-CONNECTION_POOL_SIZE = 5
+CONNECTION_POOL_SIZE = 3
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 RATE_LIMIT = 1
+MAX_CONCURRENCY = 3
 
 # Configure shared HTTP session with a connection pool
 session = requests.Session()
@@ -129,8 +130,27 @@ def mark_downloaded(output_dir: str, url: str, lock: threading.Lock, downloaded:
             f.write(url + '\n')
 
 
-def make_archive_url(timestamp: str, original_url: str) -> str:
-    return f"{ARCHIVE_PREFIX}{timestamp}/{original_url}"
+def make_archive_url(timestamp: str, original_url: str, raw: bool = False) -> str:
+    suffix = 'id_/' if raw else ''
+    return f"{ARCHIVE_PREFIX}{timestamp}{suffix}{original_url}"
+
+
+def find_nearest_snapshot(original_url: str, timestamp: str) -> str | None:
+    """Query the CDX API for the closest snapshot of the given URL."""
+    cdx = (
+        "https://web.archive.org/cdx/search/cdx?"\
+        f"url={original_url}&output=json&limit=1"\
+        f"&closest={timestamp}&filter=statuscode:200&fl=timestamp"
+    )
+    try:
+        resp = session.get(cdx)
+        resp.raise_for_status()
+        data = resp.json()
+        if len(data) > 1 and len(data[1]) > 0:
+            return str(data[1][0])
+    except Exception as e:
+        log(f"CDX lookup failed for {original_url}: {e}")
+    return None
 
 
 def rewrite_css(
@@ -253,40 +273,70 @@ def process_asset(
 
     log(f"Fetching asset {asset_url}")
 
-    archive_url = make_archive_url(asset_timestamp, original)
+    ext = os.path.splitext(urlparse(original).path)[1].lower()
+    raw = ext in {'.css', '.js', '.html', '.htm'} or not ext
+    archive_url = make_archive_url(asset_timestamp, original, raw=raw)
     try:
         data = fetch_url(archive_url)
-        ext = os.path.splitext(urlparse(original).path)[1].lower()
-        if ext in TEXT_EXTS:
-            text = data.decode('utf-8', 'ignore')
-            text = strip_archive_comments(text)
-            asset_dir = os.path.dirname(local_path)
-            if ext == '.css':
-                text = rewrite_css(
-                    text,
-                    original,
-                    asset_dir,
-                    output_dir,
-                    asset_timestamp,
-                    downloaded,
-                    lock,
-                )
-            elif ext == '.js':
-                text = rewrite_js(
-                    text,
-                    original,
-                    asset_dir,
-                    output_dir,
-                    asset_timestamp,
-                    downloaded,
-                    lock,
-                )
-            data = text.encode('utf-8')
-        save_file(data, local_path)
-        mark_downloaded(output_dir, original, lock, downloaded)
     except Exception as e:
-        log(f"Failed to download {asset_url}: {e}")
-        return asset_url
+        log(f"Failed to fetch {archive_url}: {e}")
+        nearest = find_nearest_snapshot(original, asset_timestamp)
+        if nearest and nearest != asset_timestamp:
+            log(f"Retrying {original} with snapshot {nearest}")
+            archive_url = make_archive_url(nearest, original, raw=raw)
+            try:
+                data = fetch_url(archive_url)
+            except Exception as e2:
+                log(f"Failed alternate snapshot for {asset_url}: {e2}")
+                return asset_url
+        else:
+            return asset_url
+
+    ext = os.path.splitext(urlparse(original).path)[1].lower()
+    if ext in TEXT_EXTS:
+        text = data.decode('utf-8', 'ignore')
+        text = strip_archive_comments(text)
+        asset_dir = os.path.dirname(local_path)
+        if ext == '.css':
+            text = rewrite_css(
+                text,
+                original,
+                asset_dir,
+                output_dir,
+                asset_timestamp,
+                downloaded,
+                lock,
+            )
+        elif ext == '.js':
+            text = rewrite_js(
+                text,
+                original,
+                asset_dir,
+                output_dir,
+                asset_timestamp,
+                downloaded,
+                lock,
+            )
+        data = text.encode('utf-8')
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        save_file(data, local_path)
+        expected = hashlib.md5(data).hexdigest()
+        with open(local_path, 'rb') as f:
+            actual = hashlib.md5(f.read()).hexdigest()
+        if expected == actual:
+            break
+        if attempt == MAX_RETRIES:
+            log(f"Hash mismatch for {archive_url}, giving up")
+            break
+        log(f"Hash mismatch for {archive_url}, retrying")
+        time.sleep(RETRY_DELAY)
+        try:
+            data = fetch_url(archive_url)
+        except Exception:
+            break
+
+    mark_downloaded(output_dir, original, lock, downloaded)
     return os.path.relpath(local_path, page_dir)
 
 
@@ -460,7 +510,8 @@ def download_page(archive_url: str, output_dir: str, concurrency: int):
     lock = threading.Lock()
     log(f"Fetching {original_url} from {archive_url}")
 
-    html_bytes = fetch_url(archive_url)
+    html_url = make_archive_url(timestamp, original_url, raw=True)
+    html_bytes = fetch_url(html_url)
     html = html_bytes.decode('utf-8', 'ignore')
     local_page = process_html(
         html,
@@ -479,14 +530,15 @@ def main():
     parser = argparse.ArgumentParser(description='Archive.org site ripper')
     parser.add_argument('url', help='Direct archive.org URL')
     parser.add_argument('-o', '--output', default='output', help='Output directory')
-    parser.add_argument('-c', '--concurrency', type=int, default=1, help='Number of parallel downloads')
+    parser.add_argument('-c', '--concurrency', type=int, default=1, help='Number of parallel downloads (max 3)')
     parser.add_argument('--reset', action='store_true', help='Clear downloaded log before running')
     args = parser.parse_args()
     if args.reset:
         path = os.path.join(args.output, '.downloaded.txt')
         if os.path.exists(path):
             os.remove(path)
-    page = download_page(args.url, args.output, args.concurrency)
+    conc = min(args.concurrency, MAX_CONCURRENCY)
+    page = download_page(args.url, args.output, conc)
     log(f'Saved page to {page}')
 
 

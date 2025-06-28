@@ -8,10 +8,14 @@ Features:
 - Strips the Wayback toolbar and injected scripts
 - Removes archive.org comments from HTML, CSS and JavaScript
 - Rewrites asset and link paths to remove archive.org prefixes using relative locations when possible; each file is fetched using its own Wayback timestamp if present
+- HTML, CSS and JavaScript files are downloaded using the `id_` form of the Wayback URL so the content is untouched by the archive
 - Removes `<script>` and `<link>` tags that load files from `web-static.archive.org`
 - Scans downloaded CSS and JavaScript for additional resources which are fetched and rewritten
+- If an asset is missing, the CDX API is queried to find the nearest snapshot
 - Stores the main page with `.html` appended
 - Cleans the HTML before fetching assets so only referenced resources are saved
+- Verifies downloaded files by comparing hashes and retries on mismatch
+- No more than three connections are opened at once, regardless of requested concurrency
 
 ## Requirements
 
@@ -38,8 +42,9 @@ Use `-o` to select a different output directory.
 python ripper.py <archive url> -o mydir
 ```
 
-Increase `-c/--concurrency` to download assets in parallel. The default of `1`
-fetches one file at a time, but higher values speed up large pages:
+Increase `-c/--concurrency` to download assets in parallel. No more than three
+connections are used even if you specify a higher value. The default of `1`
+fetches one file at a time:
 
 ```bash
 python ripper.py <archive url> -c 10
