@@ -396,16 +396,14 @@ def process_html(
         url = tag.get(attr)
         if not url or url.startswith('data:'):
             return
-        abs_archive = urljoin(page_archive_url, url)
+        abs_url = urljoin(original_url, url)
         ts = timestamp
-        if 'web.archive.org' in abs_archive:
+        if 'web.archive.org' in abs_url:
             try:
-                ts, abs_url = parse_archive_url(abs_archive)
+                ts, abs_url = parse_archive_url(abs_url)
             except ValueError:
                 tag.decompose()
                 return
-        else:
-            abs_url = urljoin(original_url, url)
         if urlparse(abs_url).netloc == 'web-static.archive.org':
             tag.decompose()
             return
@@ -423,8 +421,6 @@ def process_html(
             except ValueError:
                 tag[attr] = abs_archive
                 return
-        else:
-            abs_url = urljoin(original_url, url)
         parsed_abs = urlparse(abs_url)
         parsed_base = urlparse(original_url)
         if parsed_abs.netloc == parsed_base.netloc:
@@ -471,17 +467,15 @@ def process_html(
         srcset = []
         for part in t['srcset'].split(','):
             url_part = part.strip().split(' ')
-            abs_archive = urljoin(page_archive_url, url_part[0])
+            abs_url = urljoin(original_url, url_part[0])
             ts = timestamp
-            if 'web.archive.org' in abs_archive:
+            if 'web.archive.org' in abs_url:
                 try:
-                    ts, abs_url = parse_archive_url(abs_archive)
+                    ts, abs_url = parse_archive_url(abs_url)
                 except ValueError:
                     t.decompose()
                     srcset = []
                     break
-            else:
-                abs_url = urljoin(original_url, url_part[0])
             if urlparse(abs_url).netloc == 'web-static.archive.org':
                 t.decompose()
                 srcset = []
