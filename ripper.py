@@ -390,6 +390,7 @@ def process_html(
 
     page_local = compute_local_path(output_dir, original_url, add_ext=True)
     page_dir = os.path.dirname(page_local)
+    page_archive_url = make_archive_url(timestamp, original_url)
 
     def prepare_asset(tag, attr, collection):
         url = tag.get(attr)
