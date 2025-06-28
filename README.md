@@ -7,8 +7,9 @@ Features:
 - Downloads the snapshot page and every asset referenced from the HTML, CSS and JavaScript
 - Strips the Wayback toolbar and injected scripts
 - Removes archive.org comments from HTML, CSS and JavaScript
-- Rewrites asset and link paths to remove archive.org prefixes using relative locations when possible
+- Rewrites asset and link paths to remove archive.org prefixes using relative locations when possible; each file is fetched using its own Wayback timestamp if present
 - Removes `<script>` and `<link>` tags that load files from `web-static.archive.org`
+- Scans downloaded CSS and JavaScript for additional resources which are fetched and rewritten
 - Stores the main page with `.html` appended
 - Cleans the HTML before fetching assets so only referenced resources are saved
 

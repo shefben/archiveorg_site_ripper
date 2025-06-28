@@ -146,7 +146,11 @@ def rewrite_css(
         url = match.group(1).strip().strip("'\"")
         if url.startswith('data:'):
             return match.group(0)
-        abs_url = urljoin(base_url, url)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
         if 'web.archive.org' in abs_url:
             try:
                 _, abs_url = parse_archive_url(abs_url)
@@ -168,7 +172,11 @@ def rewrite_css(
         url = match.group(1).strip().strip("'\"")
         if url.startswith('data:'):
             return match.group(0)
-        abs_url = urljoin(base_url, url)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
         if 'web.archive.org' in abs_url:
             try:
                 _, abs_url = parse_archive_url(abs_url)
@@ -204,7 +212,11 @@ def rewrite_js(
         url = match.group(1)
         if url.startswith('data:'):
             return match.group(0)
-        abs_url = urljoin(base_url, url)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
         if 'web.archive.org' in abs_url:
             try:
                 _, abs_url = parse_archive_url(abs_url)
@@ -230,7 +242,7 @@ def process_asset(
     asset_url: str,
     page_dir: str,
     output_dir: str,
-    timestamp: str,
+    asset_timestamp: str,
     downloaded: set,
     lock: threading.Lock,
 ) -> str:
@@ -241,7 +253,7 @@ def process_asset(
 
     log(f"Fetching asset {asset_url}")
 
-    archive_url = make_archive_url(timestamp, original)
+    archive_url = make_archive_url(asset_timestamp, original)
     try:
         data = fetch_url(archive_url)
         ext = os.path.splitext(urlparse(original).path)[1].lower()
@@ -255,7 +267,7 @@ def process_asset(
                     original,
                     asset_dir,
                     output_dir,
-                    timestamp,
+                    asset_timestamp,
                     downloaded,
                     lock,
                 )
@@ -265,7 +277,7 @@ def process_asset(
                     original,
                     asset_dir,
                     output_dir,
-                    timestamp,
+                    asset_timestamp,
                     downloaded,
                     lock,
                 )
@@ -327,35 +339,41 @@ def process_html(
 
     page_local = compute_local_path(output_dir, original_url, add_ext=True)
     page_dir = os.path.dirname(page_local)
+    page_archive_url = make_archive_url(timestamp, original_url)
 
     def prepare_asset(tag, attr, collection):
         url = tag.get(attr)
         if not url or url.startswith('data:'):
             return
-        abs_url = urljoin(original_url, url)
-        if 'web.archive.org' in abs_url:
+        abs_archive = urljoin(page_archive_url, url)
+        ts = timestamp
+        if 'web.archive.org' in abs_archive:
             try:
-                _, abs_url = parse_archive_url(abs_url)
+                ts, abs_url = parse_archive_url(abs_archive)
             except ValueError:
                 tag.decompose()
                 return
+        else:
+            abs_url = urljoin(original_url, url)
         if urlparse(abs_url).netloc == 'web-static.archive.org':
             tag.decompose()
             return
         if abs_url.startswith('http'):
-            collection.append((tag, attr, abs_url))
+            collection.append((tag, attr, abs_url, ts))
 
     def rewrite_link(tag, attr):
         url = tag.get(attr)
         if not url or url.startswith('data:'):
             return
-        abs_url = urljoin(original_url, url)
-        if 'web.archive.org' in abs_url:
+        abs_archive = urljoin(page_archive_url, url)
+        if 'web.archive.org' in abs_archive:
             try:
-                _, abs_url = parse_archive_url(abs_url)
+                _, abs_url = parse_archive_url(abs_archive)
             except ValueError:
-                tag[attr] = abs_url
+                tag[attr] = abs_archive
                 return
+        else:
+            abs_url = urljoin(original_url, url)
         parsed_abs = urlparse(abs_url)
         parsed_base = urlparse(original_url)
         if parsed_abs.netloc == parsed_base.netloc:
@@ -386,11 +404,11 @@ def process_html(
                     url,
                     page_dir,
                     output_dir,
-                    timestamp,
+                    ts,
                     downloaded,
                     lock,
                 ): (tag, attr)
-                for tag, attr, url in assets
+                for tag, attr, url, ts in assets
             }
             for fut in concurrent.futures.as_completed(mapping):
                 tag, attr = mapping[fut]
@@ -402,14 +420,17 @@ def process_html(
         srcset = []
         for part in t['srcset'].split(','):
             url_part = part.strip().split(' ')
-            abs_url = urljoin(original_url, url_part[0])
-            if 'web.archive.org' in abs_url:
+            abs_archive = urljoin(page_archive_url, url_part[0])
+            ts = timestamp
+            if 'web.archive.org' in abs_archive:
                 try:
-                    _, abs_url = parse_archive_url(abs_url)
+                    ts, abs_url = parse_archive_url(abs_archive)
                 except ValueError:
                     t.decompose()
                     srcset = []
                     break
+            else:
+                abs_url = urljoin(original_url, url_part[0])
             if urlparse(abs_url).netloc == 'web-static.archive.org':
                 t.decompose()
                 srcset = []
@@ -418,7 +439,7 @@ def process_html(
                 abs_url,
                 page_dir,
                 output_dir,
-                timestamp,
+                ts,
                 downloaded,
                 lock,
             )
