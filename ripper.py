@@ -89,18 +89,6 @@ def compute_local_path(output_dir: str, original_url: str, add_ext: bool = False
     return local
 
 
-def get_snapshot_list(original_url: str, output_dir: str):
-    """Fetch or load the Wayback snapshot index."""
-    path = os.path.join(output_dir, 'snapshot.cdx.json')
-    if os.path.exists(path):
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    url = f'https://web.archive.org/cdx/search/cdx?url={original_url}&output=json'
-    data = fetch_url(url).decode('utf-8', 'ignore')
-    os.makedirs(output_dir, exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(data)
-    return json.loads(data)
 
 
 def load_downloaded(output_dir: str):
@@ -274,7 +262,6 @@ def process_html(
 
 def download_page(archive_url: str, output_dir: str, concurrency: int):
     timestamp, original_url = parse_archive_url(archive_url)
-    get_snapshot_list(original_url, output_dir)
     downloaded = load_downloaded(output_dir)
     lock = threading.Lock()
 
@@ -297,13 +284,12 @@ def main():
     parser.add_argument('url', help='Direct archive.org URL')
     parser.add_argument('-o', '--output', default='output', help='Output directory')
     parser.add_argument('-c', '--concurrency', type=int, default=1, help='Number of parallel downloads')
-    parser.add_argument('--reset', action='store_true', help='Clear cached state before running')
+    parser.add_argument('--reset', action='store_true', help='Clear downloaded log before running')
     args = parser.parse_args()
     if args.reset:
-        for name in ['snapshot.cdx.json', '.downloaded.txt']:
-            path = os.path.join(args.output, name)
-            if os.path.exists(path):
-                os.remove(path)
+        path = os.path.join(args.output, '.downloaded.txt')
+        if os.path.exists(path):
+            os.remove(path)
     page = download_page(args.url, args.output, args.concurrency)
     print(f'Saved page to {page}')
 

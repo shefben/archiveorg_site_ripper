@@ -42,6 +42,6 @@ fetches one file at a time, but higher values speed up large pages:
 python ripper.py <archive url> -c 10
 ```
 
-The tool caches the snapshot index (`snapshot.cdx.json`) and records completed
-downloads in `.downloaded.txt`. Re-running the same command resumes where it
-left off. Use `--reset` to clear the cache and start fresh.
+The ripper records downloaded assets in `.downloaded.txt`. Re-running the same
+command skips files already fetched so you can resume an interrupted run. Use
+`--reset` to clear this log and start fresh.
