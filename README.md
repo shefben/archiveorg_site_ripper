@@ -4,10 +4,11 @@ A small Python tool for ripping individual pages from the Internet Archive and r
 
 Features:
 
-- Downloads the snapshot page and all referenced assets
+- Downloads the snapshot page and every asset referenced from the HTML, CSS and JavaScript
 - Strips the Wayback toolbar and injected scripts
 - Removes archive.org comments from HTML, CSS and JavaScript
 - Rewrites asset paths to relative locations and cleans links back to the original URLs
+- Removes `<script>` tags that load files from `web-static.archive.org`
 - Stores the main page with `.html` appended
 
 ## Requirements
