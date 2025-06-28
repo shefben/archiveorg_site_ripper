@@ -390,6 +390,7 @@ def process_html(
 
     page_local = compute_local_path(output_dir, original_url, add_ext=True)
     page_dir = os.path.dirname(page_local)
+    page_archive_url = make_archive_url(timestamp, original_url)
 
     def prepare_asset(tag, attr, collection):
         url = tag.get(attr)
@@ -413,12 +414,12 @@ def process_html(
         url = tag.get(attr)
         if not url or url.startswith('data:'):
             return
-        abs_url = urljoin(original_url, url)
-        if 'web.archive.org' in abs_url:
+        abs_archive = urljoin(page_archive_url, url)
+        if 'web.archive.org' in abs_archive:
             try:
-                _, abs_url = parse_archive_url(abs_url)
+                _, abs_url = parse_archive_url(abs_archive)
             except ValueError:
-                tag[attr] = abs_url
+                tag[attr] = abs_archive
                 return
         parsed_abs = urlparse(abs_url)
         parsed_base = urlparse(original_url)
