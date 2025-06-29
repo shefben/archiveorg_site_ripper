@@ -101,7 +101,7 @@ def compute_local_path(output_dir: str, original_url: str, add_ext: bool = False
     path = parsed.path
     if path.endswith('/'):
         path += 'index.html'
-    local = os.path.join(output_dir, parsed.netloc, path.lstrip('/'))
+    local = os.path.join(output_dir, path.lstrip('/'))
     if parsed.query:
         h = hashlib.md5(parsed.query.encode()).hexdigest()[:8]
         base, ext = os.path.splitext(local)
@@ -109,6 +109,19 @@ def compute_local_path(output_dir: str, original_url: str, add_ext: bool = False
     if add_ext:
         local = local + '.html'
     return local
+
+
+def clean_rel_path(path: str) -> str:
+    """Remove leading relative path tokens from a URL or file path."""
+    prefixes = ['../', '..\\', './', '.\\', '.', '\\']
+    changed = True
+    while changed:
+        changed = False
+        for p in prefixes:
+            if path.startswith(p):
+                path = path[len(p):]
+                changed = True
+    return path.lstrip('/')
 
 
 
@@ -458,6 +471,211 @@ def scan_dynamic_js(
     return text
 
 
+def find_nearest_snapshot(original_url: str, timestamp: str) -> Optional[str]:
+    """Query the CDX API for the closest snapshot of the given URL."""
+    cdx = (
+        "https://web.archive.org/cdx/search/cdx?"\
+        f"url={original_url}&output=json&limit=1"\
+        f"&closest={timestamp}&filter=statuscode:200&fl=timestamp"
+    )
+    try:
+        resp = session.get(cdx)
+        resp.raise_for_status()
+        data = resp.json()
+        if len(data) > 1 and len(data[1]) > 0:
+            return str(data[1][0])
+    except Exception as e:
+        log(f"CDX lookup failed for {original_url}: {e}")
+    return None
+
+
+def rewrite_css(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+) -> str:
+    def repl_url(match):
+        url = match.group(1).strip().strip("'\"")
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = clean_rel_path(
+            process_asset(
+                abs_url,
+                asset_dir,
+                output_dir,
+                timestamp,
+                downloaded,
+                lock,
+            )
+        )
+        return f"url('{rel}')"
+
+    def repl_import(match):
+        url = match.group(1).strip().strip("'\"")
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = clean_rel_path(
+            process_asset(
+                abs_url,
+                asset_dir,
+                output_dir,
+                timestamp,
+                downloaded,
+                lock,
+            )
+        )
+        return f"@import url('{rel}')"
+
+    text = CSS_URL_RE.sub(repl_url, text)
+    text = CSS_IMPORT_RE.sub(repl_import, text)
+    return text
+
+
+def rewrite_js(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+    ) -> str:
+    def repl(match):
+        url = match.group(1)
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = clean_rel_path(
+            process_asset(
+                abs_url,
+                asset_dir,
+                output_dir,
+                timestamp,
+                downloaded,
+                lock,
+            )
+        )
+        quote = match.group(0)[0]
+        return f"{quote}{rel}{quote}"
+
+    text = JS_URL_RE.sub(repl, text)
+    text = scan_dynamic_js(
+        text,
+        base_url,
+        asset_dir,
+        output_dir,
+        timestamp,
+        downloaded,
+        lock,
+    )
+    return text
+
+
+def _rel_base_path(base_url: str, base_path: str, asset_dir: str, output_dir: str) -> str:
+    """Return a relative base path for rewriting JS dynamic asset prefixes."""
+    dummy = urljoin(base_url, base_path.lstrip('/') + 'dummy.file')
+    local = compute_local_path(output_dir, dummy)
+    local_dir = os.path.dirname(local)
+    rel = os.path.relpath(local_dir, asset_dir)
+    if not rel.endswith('/'):
+        rel += '/'
+    return clean_rel_path(rel)
+
+
+def scan_dynamic_js(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+) -> str:
+    """Look for simple dynamic asset constructions inside JavaScript."""
+    base_vars = {}
+
+    def replace_base(match):
+        name = match.group(1)
+        path = match.group(2)
+        base_vars[name] = path
+        rel = clean_rel_path(
+            _rel_base_path(base_url, path, asset_dir, output_dir)
+        )
+        return f'var {name} = "{rel}";'
+
+    text = re.sub(r"var\s+(\w+)\s*=\s*['\"]([^'\"]+)['\"]\s*;", replace_base, text)
+
+    arrays: dict[str, list[str]] = {}
+    for pat in [r"var\s+(\w+)\s*=\s*new\s+Array\(([^)]*)\)", r"var\s+(\w+)\s*=\s*\[([^\]]*)\]"]:
+        for m in re.finditer(pat, text):
+            name = m.group(1)
+            items = re.findall(r"['\"]([^'\"]+)['\"]", m.group(2))
+            arrays[name] = items
+
+    pattern = re.compile(
+        r"(\w+)\s*\+\s*(?:['\"]([^'\"]+)['\"]\s*\+\s*)?(\w+)\[[^\]]+\]\s*\+\s*['\"]([^'\"]+)['\"]"
+    )
+
+    for m in pattern.finditer(text):
+        base_var, prefix, arr_var, ext = m.groups()
+        if base_var not in base_vars or arr_var not in arrays:
+            continue
+        base_path = base_vars[base_var]
+        prefix = prefix or ''
+        for item in arrays[arr_var]:
+            asset = base_path + prefix + item + ext
+            abs_url = urljoin(base_url, asset)
+            process_asset(
+                abs_url,
+                asset_dir,
+                output_dir,
+                timestamp,
+                downloaded,
+                lock,
+            )
+
+    return text
+
+
 def process_asset(
     asset_url: str,
     page_dir: str,
@@ -469,7 +687,7 @@ def process_asset(
     original = asset_url
     local_path = compute_local_path(output_dir, original)
     if original in downloaded or os.path.exists(local_path):
-        return os.path.relpath(local_path, page_dir)
+        return clean_rel_path(os.path.relpath(local_path, page_dir))
 
     log(f"Fetching asset {asset_url}")
 
@@ -537,7 +755,7 @@ def process_asset(
             break
 
     mark_downloaded(output_dir, original, lock, downloaded)
-    return os.path.relpath(local_path, page_dir)
+    return clean_rel_path(os.path.relpath(local_path, page_dir))
 
 
 def process_html(
@@ -623,7 +841,7 @@ def process_html(
         parsed_abs = urlparse(abs_val)
         parsed_base = urlparse(original_url)
         if parsed_abs.netloc == parsed_base.netloc:
-            new_url = parsed_abs.path.lstrip('/')
+            new_url = clean_rel_path(parsed_abs.path)
             if parsed_abs.query:
                 new_url += '?' + parsed_abs.query
             if parsed_abs.fragment:
@@ -659,7 +877,7 @@ def process_html(
             for fut in concurrent.futures.as_completed(mapping):
                 tag, attr = mapping[fut]
                 try:
-                    tag[attr] = fut.result()
+                    tag[attr] = clean_rel_path(fut.result())
                 except Exception:
                     tag.decompose()
     for t in soup.find_all(attrs={'srcset': True}):
@@ -679,13 +897,15 @@ def process_html(
                 t.decompose()
                 srcset = []
                 break
-            rel = process_asset(
-                abs_url,
-                page_dir,
-                output_dir,
-                ts,
-                downloaded,
-                lock,
+            rel = clean_rel_path(
+                process_asset(
+                    abs_url,
+                    page_dir,
+                    output_dir,
+                    ts,
+                    downloaded,
+                    lock,
+                )
             )
             url_part[0] = rel
             srcset.append(' '.join(url_part))
