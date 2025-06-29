@@ -12,6 +12,7 @@ Features:
 - Removes `<script>` and `<link>` tags that load files from `web-static.archive.org`
 - Scans downloaded CSS and JavaScript for additional resources and rewrites their paths; simple dynamic JavaScript constructions are also parsed so referenced images are fetched
 - Asset paths rewritten inside CSS and JavaScript are normalized to remove any leading slashes and relative path prefixes like `./` or `../`
+- All rewritten paths use forward slashes even on Windows
 - Handles `web` paths missing the archive domain by prepending `https://web.archive.org` before downloading
 - `background` attributes are processed like other asset references
 - If an asset is missing, the CDX API is queried to find the nearest snapshot
