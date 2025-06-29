@@ -11,6 +11,7 @@ Features:
 - HTML, CSS and JavaScript files are downloaded using the `id_` form of the Wayback URL so the content is untouched by the archive
 - Removes `<script>` and `<link>` tags that load files from `web-static.archive.org`
 - Scans downloaded CSS and JavaScript for additional resources and rewrites their paths; simple dynamic JavaScript constructions are also parsed so referenced images are fetched
+- Any downloaded text file is analyzed to detect HTML, CSS or JavaScript so nested assets can be fetched and paths rewritten
 - Asset paths rewritten inside CSS and JavaScript are normalized to remove any leading slashes and relative path prefixes like `./` or `../`
 - All rewritten paths use forward slashes even on Windows
 - Handles `web` paths missing the archive domain by prepending `https://web.archive.org` before downloading

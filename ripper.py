@@ -36,8 +36,19 @@ session.mount('http://', adapter)
 session.mount('https://', adapter)
 session.headers.update({'User-Agent': 'ArchiveRipper/1.0'})
 
-# File types that are likely textual and can be cleaned of Wayback comments
-TEXT_EXTS = {'.css', '.js', '.html', '.htm', '.svg', '.json', '.xml', '.txt'}
+# File extensions commonly treated as text
+TEXT_EXTS = {
+    '.css', '.js', '.html', '.htm', '.svg', '.json', '.xml', '.txt',
+    '.php', '.asp', '.aspx', '.jsp', '.cgi'
+}
+
+# Regex patterns to extract asset URLs from CSS and JavaScript files
+CSS_URL_RE = re.compile(r"url\(([^)]+)\)")
+CSS_IMPORT_RE = re.compile(r"@import\s+(?:url\()?['\"]([^'\"]+)['\"]\)?")
+# Common asset extensions that might be referenced from JavaScript
+JS_URL_RE = re.compile(
+    r"['\"]([^'\"]+\.(?:css|js|png|jpe?g|gif|svg|webp|mp4|mp3|webm|woff2?|woff|ttf|eot|otf|json|xml))['\"]"
+)
 
 # Regex patterns to extract asset URLs from CSS and JavaScript files
 CSS_URL_RE = re.compile(r"url\(([^)]+)\)")
@@ -123,6 +134,27 @@ def clean_rel_path(path: str) -> str:
                 changed = True
     path = path.lstrip('/\\')
     return path.replace('\\', '/')
+
+
+def detect_file_type(text: str, ext: str) -> Optional[str]:
+    """Guess whether text represents HTML, CSS or JavaScript."""
+    ext = ext.lower()
+    if ext in {'.html', '.htm', '.php', '.asp', '.aspx', '.jsp', '.cgi'}:
+        return 'html'
+    if ext == '.css':
+        return 'css'
+    if ext == '.js':
+        return 'js'
+    low = text.lower()
+    if '<html' in low or '<!doctype' in low:
+        return 'html'
+    if re.search(r'\{[^\{]*:[^\}]*\}', text) and '@import' in low or 'url(' in low:
+        return 'css'
+    if 'function' in low or 'var ' in low or 'document.' in low:
+        return 'js'
+    return None
+
+
 
 
 def load_downloaded(output_dir: str):
@@ -1085,6 +1117,219 @@ def scan_dynamic_js(
     return text
 
 
+def find_nearest_snapshot(original_url: str, timestamp: str) -> Optional[str]:
+    """Query the CDX API for the closest snapshot of the given URL."""
+    cdx = (
+        "https://web.archive.org/cdx/search/cdx?"\
+        f"url={original_url}&output=json&limit=1"\
+        f"&closest={timestamp}&filter=statuscode:200&fl=timestamp"
+    )
+    try:
+        resp = session.get(cdx)
+        resp.raise_for_status()
+        data = resp.json()
+        if len(data) > 1 and len(data[1]) > 0:
+            return str(data[1][0])
+    except Exception as e:
+        log(f"CDX lookup failed for {original_url}: {e}")
+    return None
+
+
+def rewrite_css(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+    concurrency: int = 1,
+) -> str:
+    def repl_url(match):
+        url = match.group(1).strip().strip("'\"")
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = clean_rel_path(
+            process_asset(
+                abs_url,
+                asset_dir,
+                output_dir,
+                timestamp,
+                downloaded,
+                lock,
+                concurrency,
+            )
+        )
+        return f"url('{rel}')"
+
+    def repl_import(match):
+        url = match.group(1).strip().strip("'\"")
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = clean_rel_path(
+            process_asset(
+                abs_url,
+                asset_dir,
+                output_dir,
+                timestamp,
+                downloaded,
+                lock,
+                concurrency,
+            )
+        )
+        return f"@import url('{rel}')"
+
+    text = CSS_URL_RE.sub(repl_url, text)
+    text = CSS_IMPORT_RE.sub(repl_import, text)
+    return text
+
+
+def rewrite_js(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+    concurrency: int = 1,
+    ) -> str:
+    def repl(match):
+        url = match.group(1)
+        if url.startswith('data:'):
+            return match.group(0)
+        if url.startswith('/web/'):
+            archive_base = make_archive_url(timestamp, base_url)
+            abs_url = urljoin(archive_base, url)
+        else:
+            abs_url = urljoin(base_url, url)
+        if 'web.archive.org' in abs_url:
+            try:
+                _, abs_url = parse_archive_url(abs_url)
+            except ValueError:
+                return match.group(0)
+        if urlparse(abs_url).netloc == 'web-static.archive.org':
+            return match.group(0)
+        rel = clean_rel_path(
+            process_asset(
+                abs_url,
+                asset_dir,
+                output_dir,
+                timestamp,
+                downloaded,
+                lock,
+                concurrency,
+            )
+        )
+        quote = match.group(0)[0]
+        return f"{quote}{rel}{quote}"
+
+    text = JS_URL_RE.sub(repl, text)
+    text = scan_dynamic_js(
+        text,
+        base_url,
+        asset_dir,
+        output_dir,
+        timestamp,
+        downloaded,
+        lock,
+        concurrency,
+    )
+    return text
+
+
+def _rel_base_path(base_url: str, base_path: str, asset_dir: str, output_dir: str) -> str:
+    """Return a relative base path for rewriting JS dynamic asset prefixes."""
+    dummy = urljoin(base_url, base_path.lstrip('/') + 'dummy.file')
+    local = compute_local_path(output_dir, dummy)
+    local_dir = os.path.dirname(local)
+    rel = os.path.relpath(local_dir, asset_dir)
+    if not rel.endswith('/'):
+        rel += '/'
+    return clean_rel_path(rel)
+
+
+def scan_dynamic_js(
+    text: str,
+    base_url: str,
+    asset_dir: str,
+    output_dir: str,
+    timestamp: str,
+    downloaded: set,
+    lock: threading.Lock,
+    concurrency: int = 1,
+) -> str:
+    """Look for simple dynamic asset constructions inside JavaScript."""
+    base_vars = {}
+
+    def replace_base(match):
+        name = match.group(1)
+        path = match.group(2)
+        base_vars[name] = path
+        rel = clean_rel_path(
+            _rel_base_path(base_url, path, asset_dir, output_dir)
+        )
+        return f'var {name} = "{rel}";'
+
+    text = re.sub(r"var\s+(\w+)\s*=\s*['\"]([^'\"]+)['\"]\s*;", replace_base, text)
+
+    arrays: dict[str, list[str]] = {}
+    for pat in [r"var\s+(\w+)\s*=\s*new\s+Array\(([^)]*)\)", r"var\s+(\w+)\s*=\s*\[([^\]]*)\]"]:
+        for m in re.finditer(pat, text):
+            name = m.group(1)
+            items = re.findall(r"['\"]([^'\"]+)['\"]", m.group(2))
+            arrays[name] = items
+
+    pattern = re.compile(
+        r"(\w+)\s*\+\s*(?:['\"]([^'\"]+)['\"]\s*\+\s*)?(\w+)\[[^\]]+\]\s*\+\s*['\"]([^'\"]+)['\"]"
+    )
+
+    for m in pattern.finditer(text):
+        base_var, prefix, arr_var, ext = m.groups()
+        if base_var not in base_vars or arr_var not in arrays:
+            continue
+        base_path = base_vars[base_var]
+        prefix = prefix or ''
+        for item in arrays[arr_var]:
+            asset = base_path + prefix + item + ext
+            abs_url = urljoin(base_url, asset)
+            process_asset(
+                abs_url,
+                asset_dir,
+                output_dir,
+                timestamp,
+                downloaded,
+                lock,
+                concurrency,
+            )
+
+    return text
+
+
 def process_asset(
     asset_url: str,
     page_dir: str,
@@ -1092,10 +1337,19 @@ def process_asset(
     asset_timestamp: str,
     downloaded: set,
     lock: threading.Lock,
+    concurrency: int = 1,
 ) -> str:
     original = asset_url
     local_path = compute_local_path(output_dir, original)
-    if original in downloaded or os.path.exists(local_path):
+    html_path = compute_local_path(output_dir, original, add_ext=True)
+    if original in downloaded:
+        final = html_path if os.path.exists(html_path) else local_path
+        return clean_rel_path(os.path.relpath(final, page_dir))
+    if os.path.exists(html_path):
+        mark_downloaded(output_dir, original, lock, downloaded)
+        return clean_rel_path(os.path.relpath(html_path, page_dir))
+    if os.path.exists(local_path):
+        mark_downloaded(output_dir, original, lock, downloaded)
         return clean_rel_path(os.path.relpath(local_path, page_dir))
 
     log(f"Fetching asset {asset_url}")
@@ -1120,11 +1374,25 @@ def process_asset(
             return asset_url
 
     ext = os.path.splitext(urlparse(original).path)[1].lower()
-    if ext in TEXT_EXTS:
+    is_text = ext in TEXT_EXTS or b'\0' not in data
+    if is_text:
         text = data.decode('utf-8', 'ignore')
         text = strip_archive_comments(text)
+        ftype = detect_file_type(text, ext)
+        if ftype == 'html':
+            local_html = process_html(
+                text,
+                original,
+                asset_timestamp,
+                output_dir,
+                concurrency,
+                downloaded,
+                lock,
+            )
+            mark_downloaded(output_dir, original, lock, downloaded)
+            return clean_rel_path(os.path.relpath(local_html, page_dir))
         asset_dir = os.path.dirname(local_path)
-        if ext == '.css':
+        if ftype == 'css':
             text = rewrite_css(
                 text,
                 original,
@@ -1133,8 +1401,9 @@ def process_asset(
                 asset_timestamp,
                 downloaded,
                 lock,
+                concurrency,
             )
-        elif ext == '.js':
+        elif ftype == 'js':
             text = rewrite_js(
                 text,
                 original,
@@ -1143,6 +1412,7 @@ def process_asset(
                 asset_timestamp,
                 downloaded,
                 lock,
+                concurrency,
             )
         data = text.encode('utf-8')
 
@@ -1288,6 +1558,7 @@ def process_html(
                     ts,
                     downloaded,
                     lock,
+                    concurrency,
                 ): (tag, attr)
                 for tag, attr, url, ts in assets
             }
@@ -1325,6 +1596,7 @@ def process_html(
                     ts,
                     downloaded,
                     lock,
+                    concurrency,
                 )
             )
             url_part[0] = rel
