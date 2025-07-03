@@ -1610,7 +1610,7 @@ def process_html(
     return page_local
 
 
-def download_page(archive_url: str, output_dir: str, concurrency: int):
+def download_page(archive_url: str, output_dir: str, concurrency: int, savename: str | None = None):
     timestamp, original_url = parse_archive_url(archive_url)
     downloaded = load_downloaded(output_dir)
     lock = threading.Lock()
@@ -1628,6 +1628,24 @@ def download_page(archive_url: str, output_dir: str, concurrency: int):
         downloaded,
         lock,
     )
+    # .................................................................
+    # Optional final filename override (-s / --savename)
+    # .................................................................
+    if savename:
+        # Decide which extension to use
+        root, ext = os.path.splitext(savename)
+        if not ext:                                     # user omitted it
+            # grab extension from the page we just saved (may be '' -> add .html)
+            ext = os.path.splitext(local_page)[1] or '.html'
+        final_name  = root + ext
+        final_dir   = os.path.dirname(local_page)       # stay in the same folder
+        final_path  = os.path.join(final_dir, os.path.basename(final_name))
+
+        # Replace/overwrite the file
+        os.makedirs(final_dir, exist_ok=True)
+        os.replace(local_page, final_path)
+        local_page = final_path                         # return the new path
+
     log(f"Page saved to {local_page}")
     return local_page
 
@@ -1638,13 +1656,16 @@ def main():
     parser.add_argument('-o', '--output', default='output', help='Output directory')
     parser.add_argument('-c', '--concurrency', type=int, default=1, help='Number of parallel downloads (max 3)')
     parser.add_argument('--reset', action='store_true', help='Clear downloaded log before running')
+    parser.add_argument('-s', '--savename', help=('Filename to write the main page to. If you omit an extension I '
+                                                    'will keep the one from the original page (usually ".html").'))
+
     args = parser.parse_args()
     if args.reset:
         path = os.path.join(args.output, '.downloaded.txt')
         if os.path.exists(path):
             os.remove(path)
     conc = min(args.concurrency, MAX_CONCURRENCY)
-    page = download_page(args.url, args.output, conc)
+    page = download_page(args.url, args.output, conc, args.savename)
     log(f'Saved page to {page}')
 
 
