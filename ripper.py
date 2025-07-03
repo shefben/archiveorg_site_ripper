@@ -1610,7 +1610,7 @@ def process_html(
     return page_local
 
 
-def download_page(archive_url: str, output_dir: str, concurrency: int, savename: str | None = None):
+def download_page(archive_url: str, output_dir: str, concurrency: int, savename: str  = None):
     timestamp, original_url = parse_archive_url(archive_url)
     downloaded = load_downloaded(output_dir)
     lock = threading.Lock()
