@@ -1628,9 +1628,35 @@ def download_page(archive_url: str, output_dir: str, concurrency: int, savename:
     downloaded = load_downloaded(output_dir)
     lock = threading.Lock()
     log(f"Fetching {original_url} from {archive_url}")
+    def try_fetch(ts: str, raw: bool) -> Optional[bytes]:
+        url = make_archive_url(ts, original_url, raw=raw)
+        try:
+            return fetch_url(url)
+        except Exception as e:
+            log(f"Failed to fetch {url}: {e}")
+            return None
 
-    html_url = make_archive_url(timestamp, original_url, raw=True)
-    html_bytes = fetch_url(html_url)
+    html_bytes = try_fetch(timestamp, raw=True)
+    if not html_bytes:
+        nearest = find_nearest_snapshot(original_url, timestamp)
+        if nearest and nearest != timestamp:
+            log(f"Retrying with snapshot {nearest}")
+            html_bytes = try_fetch(nearest, raw=True)
+            if html_bytes:
+                timestamp = nearest
+
+    if not html_bytes:
+        html_bytes = try_fetch(timestamp, raw=False)
+        if not html_bytes:
+            nearest = find_nearest_snapshot(original_url, timestamp)
+            if nearest and nearest != timestamp:
+                log(f"Retrying without id_ using snapshot {nearest}")
+                html_bytes = try_fetch(nearest, raw=False)
+                if html_bytes:
+                    timestamp = nearest
+
+    if not html_bytes:
+        raise Exception(f"Unable to fetch page {original_url}")
     html = html_bytes.decode('utf-8', 'ignore')
     local_page = process_html(
         html,
