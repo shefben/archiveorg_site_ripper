@@ -67,14 +67,27 @@ HREF_ASSET_TAGS = {'link'}
 
 
 def parse_archive_url(url: str):
+    """Extract the timestamp and original URL from an archive.org snapshot URL."""
     match = re.match(r'^https?://web\.archive\.org/web/(\d+)[^/]*/(.*)$', url)
     if not match:
         raise ValueError('URL is not a direct archive.org snapshot')
+
     timestamp, rest = match.groups()
+
+    # Standard snapshot URLs contain the original scheme (http/https).  Older
+    # captures sometimes omit the scheme and only include ``example.com:80``. In
+    # that case ``rest`` will not contain ``http`` at all.  Try to locate the
+    # last occurrence of ``http`` and fall back to prefixing ``http://`` when it
+    # cannot be found.
     idx = rest.rfind('http')
-    if idx == -1:
-        raise ValueError('URL is not a direct archive.org snapshot')
-    original = rest[idx:]
+    if idx != -1:
+        original = rest[idx:]
+    else:
+        # Heuristic: if the scheme is missing, assume HTTP unless the URL
+        # explicitly uses port 443, in which case HTTPS is more likely.
+        scheme = 'https://' if ':443' in rest else 'http://'
+        original = scheme + rest
+
     return timestamp, original
 
 
