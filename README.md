@@ -1,6 +1,15 @@
 # ArchiveRipper  
 A command-line utility for reconstructing archived websites from the Wayback Machine
 
+## 🔎 Previews
+<p align="center">
+  <a href="images/gui_preview.png" title="GUI Archive.org Batch Ripper preview (full size)">
+    <img src="images/gui_preview.png" alt="GUI Archive.org Batch Ripper preview" width="420">
+  </a>
+
+- Click either thumbnail to open the full-size image.
+
+
 ## 1. Introduction  
 
 ArchiveRipper is a tool for developers, archivists, researchers, and digital preservation enthusiasts who need to reconstruct archived web pages as they appeared at a specific point in time.
