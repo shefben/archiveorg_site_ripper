@@ -1,11 +1,339 @@
 import sys
 import os
+import time
+from datetime import datetime
+from urllib.parse import urlparse
 
 from PyQt5 import QtWidgets, QtCore
 
 # Import the core functions from your existing ripper script.
 # Adjust the module name if your file is named differently.
-from archive_ripper import run_ripper, focus_console_window
+from archive_ripper import (
+    run_ripper, focus_console_window, session, fetch_url, save_file,
+    make_archive_url, log, RATE_LIMIT, TEXT_EXTS, strip_archive_comments,
+)
+
+
+class EraRipWorker(QtCore.QThread):
+    """Background worker that queries the CDX API and downloads all unique
+    assets for a URL pattern within a date range."""
+
+    progress = QtCore.pyqtSignal(str)
+    finished_ok = QtCore.pyqtSignal(int)
+    error = QtCore.pyqtSignal(str)
+
+    def __init__(self, url_pattern, start_date, end_date, output_dir, parent=None):
+        super().__init__(parent)
+        self.url_pattern = url_pattern
+        self.start_date = start_date      # YYYYMMDD
+        self.end_date = end_date          # YYYYMMDD
+        self.output_dir = output_dir
+        self._cancelled = False
+
+        # Base URL is everything before the wildcard *
+        if '*' in url_pattern:
+            self.base_url = url_pattern[:url_pattern.index('*')]
+        else:
+            self.base_url = url_pattern.rstrip('/') + '/'
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            self.progress.emit(f"Querying CDX API for: {self.url_pattern}")
+            self.progress.emit(f"Date range: {self.start_date} to {self.end_date}")
+
+            entries = self._query_cdx()
+
+            if not entries:
+                self.progress.emit("No entries found matching the criteria.")
+                self.finished_ok.emit(0)
+                return
+
+            self.progress.emit(f"Found {len(entries)} unique files to download.")
+
+            downloaded_count = 0
+            for i, (original_url, timestamp) in enumerate(entries):
+                if self._cancelled:
+                    self.progress.emit("Cancelled by user.")
+                    break
+
+                self.progress.emit(
+                    f"[{i + 1}/{len(entries)}] {original_url}"
+                )
+                try:
+                    self._download_entry(original_url, timestamp)
+                    downloaded_count += 1
+                except Exception as e:
+                    self.progress.emit(f"  Failed: {e}")
+
+            self.finished_ok.emit(downloaded_count)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    # ------------------------------------------------------------------
+
+    def _query_cdx(self):
+        """Query the CDX API and return a deduplicated list of
+        (original_url, earliest_timestamp) tuples."""
+        resp = session.get(
+            "https://web.archive.org/cdx/search/cdx",
+            params={
+                'url': self.url_pattern,
+                'matchType': 'prefix',
+                'from': self.start_date,
+                'to': self.end_date,
+                'filter': 'statuscode:200',
+                'collapse': 'urlkey',
+                'fl': 'timestamp,original,digest',
+                'output': 'json',
+            },
+            timeout=300,
+        )
+        resp.raise_for_status()
+        time.sleep(RATE_LIMIT)
+
+        data = resp.json()
+        if len(data) <= 1:
+            return []
+
+        # data[0] is the header row: ['timestamp', 'original', 'digest']
+        # For each unique original URL keep only the earliest timestamp.
+        # Also skip rows whose digest we have already seen so that truly
+        # identical content is not downloaded twice under different timestamps.
+        url_earliest = {}       # original -> (timestamp, digest)
+        seen_digests = set()
+
+        for row in data[1:]:
+            if len(row) < 3:
+                continue
+            timestamp, original, digest = row[0], row[1], row[2]
+
+            if digest in seen_digests:
+                # Same content already covered by an earlier entry.
+                if original not in url_earliest:
+                    continue
+            seen_digests.add(digest)
+
+            if original not in url_earliest or timestamp < url_earliest[original][0]:
+                url_earliest[original] = (timestamp, digest)
+
+        result = [(url, ts) for url, (ts, _digest) in url_earliest.items()]
+        result.sort(key=lambda x: x[0])
+        return result
+
+    def _download_entry(self, original_url, timestamp):
+        """Download a single Wayback snapshot and save it under *output_dir*
+        using the same relative directory structure as the original site."""
+
+        # Compute relative path from the base URL
+        if original_url.startswith(self.base_url):
+            rel_path = original_url[len(self.base_url):]
+        else:
+            parsed = urlparse(original_url)
+            rel_path = parsed.path.lstrip('/')
+
+        rel_path = rel_path.strip('/')
+        if not rel_path:
+            rel_path = 'index.html'
+
+        local_path = os.path.join(self.output_dir, rel_path)
+
+        # Skip files we already have on disk
+        if os.path.exists(local_path):
+            self.progress.emit(f"  Skipped (exists): {rel_path}")
+            return
+
+        # Use raw (id_/) mode for known text extensions so the Wayback
+        # toolbar / banner is not injected into the response.
+        ext = os.path.splitext(urlparse(original_url).path)[1].lower()
+        raw = ext in TEXT_EXTS
+
+        wayback_url = make_archive_url(timestamp, original_url, raw=raw)
+        data = fetch_url(wayback_url)
+
+        # Strip leftover archive.org comments from text content
+        if raw and data:
+            try:
+                text = data.decode('utf-8', 'ignore')
+                text = strip_archive_comments(text)
+                data = text.encode('utf-8')
+            except Exception:
+                pass
+
+        save_file(data, local_path)
+        self.progress.emit(f"  Saved: {rel_path}")
+
+
+class EraRipDialog(QtWidgets.QDialog):
+    """Dialog that lets the user specify a URL pattern + date range and
+    download every unique asset captured by the Wayback Machine."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Rip Entire Era")
+        self.worker = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        form = QtWidgets.QFormLayout()
+
+        self.url_edit = QtWidgets.QLineEdit()
+        self.url_edit.setPlaceholderText(
+            "http://steamcommunity.com/public/*"
+        )
+        form.addRow("URL Pattern:", self.url_edit)
+
+        self.start_date_edit = QtWidgets.QLineEdit()
+        self.start_date_edit.setPlaceholderText("MM/DD/YYYY")
+        form.addRow("Start Date:", self.start_date_edit)
+
+        self.end_date_edit = QtWidgets.QLineEdit()
+        self.end_date_edit.setPlaceholderText("MM/DD/YYYY")
+        form.addRow("End Date:", self.end_date_edit)
+
+        dir_layout = QtWidgets.QHBoxLayout()
+        self.output_edit = QtWidgets.QLineEdit()
+        self.output_edit.setPlaceholderText("Select output folder...")
+        self.output_edit.setText("output")
+        browse_btn = QtWidgets.QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_output)
+        dir_layout.addWidget(self.output_edit)
+        dir_layout.addWidget(browse_btn)
+        form.addRow("Output Folder:", dir_layout)
+
+        layout.addLayout(form)
+
+        # Live log area
+        self.log_area = QtWidgets.QTextEdit()
+        self.log_area.setReadOnly(True)
+        self.log_area.setMinimumHeight(200)
+        layout.addWidget(self.log_area)
+
+        # Buttons
+        btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.addStretch(1)
+
+        self.rip_btn = QtWidgets.QPushButton("Rip")
+        self.rip_btn.clicked.connect(self._start_rip)
+        btn_layout.addWidget(self.rip_btn)
+
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        btn_layout.addWidget(self.cancel_btn)
+
+        layout.addLayout(btn_layout)
+
+        self.resize(650, 500)
+
+    # --- helpers ---
+
+    def _browse_output(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Output Folder"
+        )
+        if path:
+            self.output_edit.setText(path)
+
+    @staticmethod
+    def _validate_date(date_str):
+        """Return *YYYYMMDD* string if *date_str* is valid MM/DD/YYYY,
+        otherwise ``None``."""
+        try:
+            dt = datetime.strptime(date_str.strip(), "%m/%d/%Y")
+            return dt.strftime("%Y%m%d")
+        except ValueError:
+            return None
+
+    # --- actions ---
+
+    def _start_rip(self):
+        url = self.url_edit.text().strip()
+        start_raw = self.start_date_edit.text().strip()
+        end_raw = self.end_date_edit.text().strip()
+        output_dir = self.output_edit.text().strip() or "output"
+
+        if not url or not start_raw or not end_raw:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Fields",
+                "Please fill in the URL pattern, start date, and end date.",
+            )
+            return
+
+        start_ymd = self._validate_date(start_raw)
+        if not start_ymd:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Date",
+                "Start date must be in MM/DD/YYYY format.",
+            )
+            return
+
+        end_ymd = self._validate_date(end_raw)
+        if not end_ymd:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Date",
+                "End date must be in MM/DD/YYYY format.",
+            )
+            return
+
+        if start_ymd > end_ymd:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Date Range",
+                "Start date must be before or equal to end date.",
+            )
+            return
+
+        # Lock down the form while the worker runs
+        self._set_inputs_enabled(False)
+        self.log_area.clear()
+
+        focus_console_window()
+
+        self.worker = EraRipWorker(url, start_ymd, end_ymd, output_dir, self)
+        self.worker.progress.connect(self._on_progress)
+        self.worker.finished_ok.connect(self._on_done)
+        self.worker.error.connect(self._on_error)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.start()
+
+    def _on_cancel(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(5000)
+        self.close()
+
+    # --- worker callbacks ---
+
+    def _on_progress(self, msg):
+        self.log_area.append(msg)
+        log(msg)
+
+    def _on_done(self, count):
+        QtWidgets.QMessageBox.information(
+            self, "Era Rip Complete",
+            f"Downloaded {count} file(s).\n\n"
+            "Check the log above and the console window for details.",
+        )
+
+    def _on_error(self, msg):
+        QtWidgets.QMessageBox.critical(
+            self, "Error",
+            f"Era rip failed:\n{msg}\n\nCheck the console for details.",
+        )
+
+    def _on_worker_finished(self):
+        self._set_inputs_enabled(True)
+        self.worker = None
+
+    def _set_inputs_enabled(self, enabled):
+        self.url_edit.setEnabled(enabled)
+        self.start_date_edit.setEnabled(enabled)
+        self.end_date_edit.setEnabled(enabled)
+        self.output_edit.setEnabled(enabled)
+        self.rip_btn.setEnabled(enabled)
 
 
 class BatchRipperWorker(QtCore.QThread):
@@ -101,6 +429,10 @@ class BatchMainWindow(QtWidgets.QWidget):
         self.cancel_btn.clicked.connect(self.close)
         btn_layout.addWidget(self.cancel_btn)
 
+        self.era_btn = QtWidgets.QPushButton("Rip Entire Era")
+        self.era_btn.clicked.connect(self.open_era_dialog)
+        btn_layout.addWidget(self.era_btn)
+
         main_layout.addLayout(btn_layout)
 
         self.resize(700, 350)
@@ -116,6 +448,10 @@ class BatchMainWindow(QtWidgets.QWidget):
         )
         if path:
             self.save_edit.setText(path)
+
+    def open_era_dialog(self):
+        dialog = EraRipDialog(self)
+        dialog.exec_()
 
     def add_job(self):
         url = self.url_edit.text().strip()
@@ -165,6 +501,7 @@ class BatchMainWindow(QtWidgets.QWidget):
     def _set_ui_running_state(self, running: bool):
         self.add_btn.setEnabled(not running)
         self.exec_btn.setEnabled(not running)
+        self.era_btn.setEnabled(not running)
         # Cancel just closes window; leaving it disabled while a job is
         # in progress avoids pretending we support mid-run cancel.
         self.cancel_btn.setEnabled(not running)
